@@ -1,0 +1,183 @@
+---
+title: "baseballworking"
+author: "Brenden Bready"
+date: "2024-02-20"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE, warning=FALSE}
+library(baseballr)
+library(tidyverse)
+```
+
+
+
+
+```{r}
+baseballr::mlb_pbp(game_pk = 632973)
+
+baseballr::get_pbp_mlb()
+
+get_game_pks_mlb("2021-08-30")
+```
+
+```{r}
+ymd("2021-04-01") %>%
+  as.Date(origin="1970-01-01")
+```
+
+```{r}
+# Getting dates, removing July 13th
+dates = (ymd("2021-04-01"):ymd("2021-10-03")) %>% 
+  as.Date(origin="1970-01-01")
+dates = dates[-104]
+```
+
+```{r}
+# Joining all data
+gamepks = data.frame()
+for (i in 1:length(dates)){
+  gamepks = bind_rows(gamepks, get_game_pks_mlb(dates[i], level_ids = 1))
+}
+```
+
+```{r}
+# Getting full pbp
+fullpbp = data.frame()
+for (j in 1:length(gamepks$game_pk)){
+  fullpbp = bind_rows(fullpbp, get_pbp_mlb(gamepks$game_pk[j]) %>% 
+    arrange(game_pk,
+            about.inning,
+            about.atBatIndex))
+}
+write.csv(fullpbp, "fullpbp.csv", row.names = FALSE)
+```
+
+
+```{r}
+fullpbp = fullpbp[-163]
+write.csv(fullpbp, "fullpbp.csv", row.names = FALSE)
+```
+
+
+```{r}
+pbpdata2021 = fullpbp %>% 
+  select(game_pk, 
+         game_date,
+         about.inning,
+         about.halfInning,
+         about.atBatIndex,
+         pitchNumber,
+         last.pitch.of.ab,
+         count.outs.start,
+         result.homeScore,
+         result.awayScore,
+         matchup.postOnFirst.fullName, #missing if no one on this base
+         matchup.postOnSecond.fullName,#missing if no one on this base
+         matchup.postOnThird.fullName,  #missing if no one on this base
+         matchup.batter.fullName
+         ) %>% 
+  arrange(game_pk,
+          about.inning,
+          about.atBatIndex)
+```
+
+
+```{r}
+write.csv(pbpdata2021, "pbpdata2021.csv", row.names = FALSE)
+```
+
+
+
+```{r}
+get_pbp_mlb(gamepks$game_pk[1]) %>% 
+    select(game_pk, 
+           game_date,
+           about.inning,
+           about.halfInning,
+           about.atBatIndex,
+           pitchNumber,
+           last.pitch.of.ab,
+           count.outs.start,
+           result.homeScore,
+           result.awayScore,
+           matchup.postOnFirst.fullName, #missing if no one on this base
+           matchup.postOnSecond.fullName,#missing if no one on this base
+           matchup.postOnThird.fullName,  #missing if no one on this base
+           matchup.batter.fullName
+           ) %>% 
+    arrange(game_pk,
+            about.inning,
+            about.atBatIndex) %>%
+  filter(pitchNumber == 1)
+```
+
+
+```{r}
+fullpbp %>% 
+  select(game_pk, 
+         game_date,
+         about.inning,
+         about.halfInning,
+         about.atBatIndex,
+         pitchNumber,
+         last.pitch.of.ab,
+         count.outs.start,
+         result.homeScore,
+         result.awayScore,
+         matchup.postOnFirst.fullName, #missing if no one on this base
+         matchup.postOnSecond.fullName,#missing if no one on this base
+         matchup.postOnThird.fullName  #missing if no one on this base
+         ) %>% 
+  arrange(game_pk,
+          about.inning,
+          about.atBatIndex)
+```
+
+```{r}
+testdata = get_pbp_mlb(gamepks$game_pk[1])
+```
+
+
+```{r}
+gamedetails = get_pbp_mlb(game_pk = 632169)
+```
+
+```{r}
+gamedetails %>%
+  arrange(about.inning, about.halfInning, pitchNumber) %>%
+  select(game_pk, 
+         game_date,
+         about.inning,
+         about.halfInning,
+         about.atBatIndex,
+         pitchNumber,
+         last.pitch.of.ab,
+         count.outs.start,
+         result.homeScore,
+         result.awayScore,
+         matchup.postOnFirst.fullName, #missing if no one on this base
+         matchup.postOnSecond.fullName,#missing if no one on this base
+        #  matchup.postOnThird.fullName,  #missing if no one on this base
+         matchup.batter.fullName)
+```
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+
+

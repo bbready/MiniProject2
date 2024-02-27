@@ -1,0 +1,223 @@
+---
+title: "TrueBaseballworking"
+author: "Brenden Bready"
+date: "2024-02-21"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE, warning=FALSE}
+# Loading necessary libraries
+library(baseballr)
+library(tidyverse)
+```
+
+```{r}
+# Reading in our play by play data, the data was scraped in a previous R script
+pbp = read.csv("pbpdata2021.csv")
+```
+
+# Expected Runs
+
+## 1. Calculating run expectancy
+
+```{r}
+# Making cases for different situations to help with looping
+pbp = pbp %>%
+  mutate(bases = case_when(
+    is.na(matchup.postOnFirst.fullName) & is.na(matchup.postOnSecond.fullName) & is.na(matchup.postOnThird.fullName) ~ 0,
+    is.na(matchup.postOnSecond.fullName) & is.na(matchup.postOnThird.fullName) ~ 1,
+    is.na(matchup.postOnFirst.fullName) & is.na(matchup.postOnThird.fullName) ~ 2,
+    is.na(matchup.postOnFirst.fullName) & is.na(matchup.postOnSecond.fullName) ~ 3,
+    is.na(matchup.postOnThird.fullName) ~ 12,
+    is.na(matchup.postOnSecond.fullName) ~ 13,
+    is.na(matchup.postOnFirst.fullName) ~ 23,
+    TRUE ~ 123
+  ))
+```
+
+```{r}
+# Filter data to only include first pitch
+pitchone = pbp %>%
+  filter(pitchNumber == 1)
+```
+
+
+```{r}
+# Number of times each situation occured - seems to check out
+pbp %>%
+  group_by(bases) %>%
+  summarise(n())
+```
+
+```{r}
+# Get scores at end of inning, subtract scores from beginning of inning, divide by number of situations
+
+pbp %>%
+  filter(bases == 123 & count.outs.start == 0) %>%
+  filter(pitchNumber == 1)
+
+# Getting all of the last at bats of an inning (for final inning scores)
+lastbats = pitchone %>%
+  group_by(game_pk, about.inning, about.halfInning) %>%
+  slice(n())
+```
+
+```{r}
+# Get scores for current situation
+scores = pitchone %>%
+  filter(bases == 0 & count.outs.start == 2)
+
+tosub = right_join(lastbats, scores, by = c("game_pk", "game_date", "about.inning", "about.halfInning"))
+
+er = tosub %>%
+  ungroup() %>%
+  summarise(sum((result.homeScore.x + result.awayScore.x) - (result.homeScore.y + result.awayScore.y))/n())
+
+
+```
+
+```{r}
+# Start by initializing a data frame to store results
+expruns = data.frame(outs = integer(), bases = integer(), exruns = double())
+
+# Set the loop to go through each out and base runner combination
+for (i in unique(pitchone$count.outs.start)){
+  for (j in unique(pitchone$bases)){
+    
+    # Filter to get current score at each baserunner/out combo
+    scores = pitchone %>% 
+      filter(bases == j & count.outs.start == i)
+    
+    # Calculate expected runs by joining the last at bats with each of the scores
+    # at the start of the inning, ungroup results, sum and divide by total number of 
+    # situations where that event occured
+    exprun = right_join(lastbats, 
+                       scores,
+                       by = c("game_pk", "game_date", 
+                              "about.inning", "about.halfInning")) %>%
+      ungroup() %>%
+      summarise(sum((result.homeScore.x + result.awayScore.x) - 
+                      (result.homeScore.y + result.awayScore.y))/n())
+    
+    # Store results in a data frame and join with others
+    result = data.frame(outs = i, bases = j, exruns = exprun)
+    expruns = rbind(expruns, result)
+  }
+}
+expruns = expruns %>%
+  arrange(outs, bases) 
+colnames(expruns)[3] <- "exruns"
+```
+
+```{r}
+exprunsclean = pivot_wider(expruns, names_from = outs, values_from = exruns)
+```
+
+## 2 Runs Created
+
+
+Can go back and get the data with player names included
+
+
+filter to first pitch and then count occurances of each batter to get total number of at bats
+
+
+
+Number of runs at end of inning - number of runs when they start batting
+
+```{r}
+# First, need to find top 10 players in runs created
+
+```
+
+For each play, we can make a column entering the expected runs
+
+Then we can group by the inning and half inning, (new ER - old ER) + (new score - old score)
+
+
+```{r}
+# adding current expected runs as a column to dataset
+pitchone = left_join(pitchone, expruns, 
+                            by = c("count.outs.start" = "outs", "bases" = "bases"))
+```
+
+```{r}
+# Runs created during that at bat
+
+pitchone = pitchone %>%
+  group_by(game_pk, about.inning, about.halfInning) %>%
+  mutate(runscreated = (lead(exruns) - exruns) + 
+           (lead(result.homeScore) - result.homeScore) + 
+           (lead(result.awayScore) - result.awayScore)) %>%
+  ungroup() %>%
+  mutate(runscreated = ifelse(is.na(runscreated), 0, runscreated))
+
+totalrunscreated = pitchone %>%
+  group_by(matchup.batter.fullName) %>%
+  summarise(total_runs_created = round(sum(runscreated), 3), atBats = n()) %>%
+  filter(atBats >= 100) %>%
+  arrange(desc(total_runs_created)) %>%
+  mutate(Player = matchup.batter.fullName) %>%
+  select(Player, total_runs_created, atBats)
+
+
+
+avgrunscreated = pitchone %>%
+  group_by(matchup.batter.fullName) %>%
+  summarise(average_runs_created = round(sum(runscreated)/n(), 3), atBats = n()) %>%
+  filter(atBats >= 100) %>%
+  arrange(desc(average_runs_created)) %>%
+  mutate(Player = matchup.batter.fullName) %>%
+  select(Player, average_runs_created, atBats)
+
+
+```
+
+```{r}
+# Batters with 100 or more at bats
+battersover100 = pitchone %>%
+  group_by(matchup.batter.fullName) %>%
+  summarise(count = n()) %>%
+  filter(count >= 100)
+
+pitchonebatters <- pitchone %>%
+  semi_join(battersover100, by = c("matchup.batter.fullName" = "matchup.batter.fullName"))
+```
+
+```{r message=FALSE}
+fangraphs = read_csv("fangraphs.csv")
+colnames(fangraphs)[1] <- "fgrank"
+```
+
+```{r fig.width=5, fig.height=4}
+# Show difference between my rankings and fangraphs 
+avgrunscreated = avgrunscreated %>%
+  mutate(myrank = row_number())
+
+ranksjoined = left_join(avgrunscreated, fangraphs, by = c("Player" = "Name"))
+plot(ranksjoined$myrank, ranksjoined$fgrank, 
+     xlab = "Ranking my average runs created",
+     ylab = "Fangraphs WAR ranking",
+     main = "My rankings vs fangraphs WAR rankings")
+```
+
+```{r fig.width=5, fig.height=4}
+# Show difference between my rankings and fangraphs 
+totalrunscreated = totalrunscreated %>%
+  mutate(myrank = row_number())
+
+ranksjoined2 = left_join(totalrunscreated, fangraphs, by = c("Player" = "Name"))
+plot(ranksjoined2$myrank, ranksjoined2$fgrank, 
+     xlab = "Ranking my total runs created",
+     ylab = "Fangraphs WAR ranking",
+     main = "My rankings vs fangraphs WAR rankings")
+```
+
+
+
+
+

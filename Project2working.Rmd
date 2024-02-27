@@ -1,0 +1,662 @@
+---
+title: "Project2working"
+author: "Brenden Bready"
+date: "2024-02-15"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+```{r, message=FALSE, warning=FALSE}
+library(StatsBombR)
+
+## bayes packages
+library(tidyverse)
+
+# Normal select function sourcing to MASS, this will ensure it is dplyr
+# select <- dplyr::select
+
+source('geom_statsbomb.R')
+
+# library(googlesheets4)
+options(tibble.width = Inf)
+
+library(randomForest)
+library(xgboost)
+```
+
+```{r}
+# Reading in data
+shots <- read_rds("la_liga_shots.rds")
+```
+
+```{r}
+# cleaning the data
+shots <- shots %>% 
+  select(id, index, period, timestamp, minute, second, possession, duration, 
+         off_camera, location, possession_team.id, possession_team.name, 
+         play_pattern.id, play_pattern.name, team.id, 
+         team.name, 
+         player.id, player.name, position.id, 
+         position.name, 
+         starts_with("shot")) %>% 
+  select(-shot.freeze_frame) %>% 
+  as_tibble() %>% 
+  mutate(location = purrr::map(location, setNames, c("location_x","location_y"))) %>%
+  unnest_wider(location) 
+
+#clean boolean data
+shots = shots %>% 
+  mutate_at(vars(shot.first_time, 
+                 shot.one_on_one, 
+                 shot.redirect, 
+                 shot.aerial_won, 
+                 shot.open_goal, 
+                 shot.saved_to_post, 
+                 shot.deflected, 
+                 shot.saved_off_target, 
+                 shot.follows_dribble),
+            ~ ifelse(!is.na(.) & . == TRUE, 1, 0)
+  ) %>% 
+  mutate(shot.foot_head = case_when(
+    str_detect(str_to_lower(shot.body_part.name), "foot") ~ "foot", 
+    str_detect(str_to_lower(shot.body_part.name), "head") ~ "head", 
+    TRUE ~ "other"),
+    goalind = ifelse(shot.outcome.name == "Goal", 1, 0)
+         
+  )
+```
+
+
+
+```{r}
+# Creating an indicator to see if the outcome was a goal or not
+# This will be useful for logistic regression
+shots = shots %>%
+  mutate(shot.isgoal = ifelse(shot.outcome.name == "Goal", 1, 0))
+```
+
+```{r}
+# Here, we see the percentage of shots that are goals (13.7%)
+sum(shots$goalind)/length(shots$goalind)
+```
+
+```{r}
+ymin <- 0 # minimum width
+ymax <- 80 # maximum width
+xmin <- 0 # minimum length
+xmax <- 120 # maximum length
+
+y_goal <- ymax/2
+x_goal <- xmax
+```
+
+```{r}
+# Calculate distance to goal
+shots = shots %>%
+  mutate(shot_distance = sqrt(((location_x - x_goal)^2 + (location_y - (y_goal))^2)),
+         shot_angle = asin( (location_x - x_goal) / shot_distance)*(180/pi) + 90)
+```
+
+NEED TO WORK ON THIS IF WANT THIS PLOT TO SHOW UP. FIGURE OUT HOW TO MAKE A NICE PLOT TO SHOW THAT THE SHOT ANGLE CALCULATION IS CORRECT
+```{r}
+# To confirm that shot angle is accurate, let's make a plot and color by the shot angle
+geom_statsbomb + 
+  geom_hex(data = shots, 
+           aes(x = location_x, y = location_y,),
+           bins = 50) +
+  scale_fill_continuous(type = "viridis")
+
+hist(shots$shot_angle)
+hist(shots$shot_distance)
+```
+
+```{r}
+# Adding a new variable to encode a player's dominant foot
+shots = shots %>%
+  group_by(player.name) %>%
+  mutate(dominantfoot = case_when(
+    sum(shot.body_part.name == "Right Foot") > sum(shot.body_part.name == "Left Foot") ~ 1,
+    sum(shot.body_part.name == "Right Foot") < sum(shot.body_part.name == "Left Foot") ~ 0,
+    TRUE ~ NA
+  )) %>%
+  ungroup()
+```
+
+```{r}
+# Now add a variable to indicate if they shot with their preferred foot
+shots = shots %>%
+  mutate(shot.foot_preferred = case_when(
+    (shot.body_part.name == "Right Foot") & (dominantfoot == 1) ~ 1,
+    (shot.body_part.name == "Left Foot") & (dominantfoot == 0) ~ 1,
+    TRUE ~ 0
+  ))
+```
+
+```{r}
+# This is no good
+mod1 = glm(goalind ~ shot_distance + shot_angle + shot.foot_preferred + 
+             shot_distance*shot.foot_preferred +
+             shot.type.name +
+                             shot.technique.name +
+                             shot.foot_head +
+                             shot.first_time + 
+                             shot.one_on_one + 
+                             shot.redirect + 
+                             shot.aerial_won + 
+                             shot.open_goal + 
+                             shot.follows_dribble, 
+    family = binomial, data = shots)
+summary(mod1)
+plot(predict(mod1))
+```
+
+```{r}
+unique(shots$goalind)
+```
+
+
+```{r}
+shots %>% 
+  count(shot.outcome.id, shot.outcome.name)
+
+shot_data_clean <- shots %>% 
+  mutate(shot_distance = sqrt((location_x - x_goal)^2 + (location_y - (y_goal))^2),
+         shot_angle = asin( (location_x - x_goal) / shot_distance)*(180/pi)+90,#convert from radians to degrees
+         goal_ind = if_else( shot.outcome.id == 97, 1, 0)
+  )
+
+hist(shot_data_clean$shot_angle)
+hist(shot_data_clean$shot_distance)
+
+train_pct <- 0.80
+set.seed(50)
+train_data <- shot_data_clean %>% sample_frac(train_pct)
+test_data <- shot_data_clean %>% anti_join(train_data %>% select(id), by = 'id')
+# model_data <- shot_data_clean
+
+## base rates
+base_rates <- train_data %>% 
+  mutate(distance_group = cut(shot_distance, c(seq(0,40, by = 5), 100) ) ) %>% 
+  group_by(distance_group) %>% 
+  summarize(avg_goals = mean(goal_ind),
+            n_shots = n())
+base_rates
+
+### p^(x) * (1-p)^(1-x)
+### choose(n,x)* p^sum(x) * (1-p)^(n-sum(x))
+##### LOG LOSS = - mean( x*log(p) +  (1-x)*log(1-p ))
+
+## glm
+distance_mod <- glm(goal_ind ~ shot_distance, 
+                    data = train_data, 
+                    family = binomial)
+summary(distance_mod)
+
+## glm
+distance_mod_2 <- glm(goal_ind ~ splines::ns(shot_distance), 
+                    data = train_data, 
+                    family = binomial)
+summary(distance_mod_2)
+
+## glm
+angle_mod <- glm(goal_ind ~ shot_distance*shot_angle, 
+                 data = train_data, 
+                 family = binomial)
+
+summary(angle_mod)
+
+angle_spline_mod <- glm(goal_ind ~ shot_distance*splines::ns(shot_angle, df = 3), 
+                        data = train_data, 
+                        family = binomial)
+summary(angle_spline_mod)
+
+## random forest
+angle_rf_mod <- randomForest(goal_ind ~ shot_distance + shot_angle, 
+                             data = train_data)
+varImpPlot(angle_rf_mod)
+
+all_rf_mod <- randomForest(goal_ind ~ shot_distance + 
+                             shot_angle +
+                             shot.type.name +
+                             shot.technique.name +
+                             shot.foot_head +
+                             shot.first_time + 
+                             shot.one_on_one + 
+                             shot.redirect + 
+                             shot.aerial_won + 
+                             shot.open_goal + 
+                             shot.follows_dribble
+                           , 
+                           data = train_data)
+varImpPlot(all_rf_mod)
+
+#plot randomForest results
+test_data <- test_data %>% 
+  mutate(rf_predict = predict(all_rf_mod, newdata = .),
+         angle_spline_lm_predict = predict(angle_spline_mod, newdata = .,type = 'response')
+         )
+
+#diff between sb and rf xg
+test_data %>% 
+  mutate(diff_rf_sb_xg = rf_predict - shot.statsbomb_xg) %>% 
+  arrange(desc(diff_rf_sb_xg))
+
+
+## define tiles to put your xg model through
+# from x=80:120 and y  = 20:60
+x_possible <- 80:120
+y_possible <- 20:60
+
+possible_shot_tiles <- expand_grid(x_possible, y_possible) %>% 
+  mutate(shot_distance = sqrt((x_possible - x_goal)^2 + (y_possible - (y_goal))^2),
+         shot_angle = acos( (x_possible - x_goal) / shot_distance)*(180/pi)-90#convert from radians to degrees
+  )
+
+#add model predictions
+### - if you use more variables than distance/angle then you need to set them all the same here in your data
+##### to look at the plot
+possible_shot_tiles <- possible_shot_tiles %>% 
+  mutate(angle_spline_lm_predict = predict(angle_spline_mod, newdata = .,type = 'response')
+         )
+
+
+geom_statsbomb +
+  geom_raster(data = possible_shot_tiles, 
+              aes(x = x_possible, y = y_possible, fill = angle_spline_lm_predict), 
+              alpha = 0.5) +
+  scale_x_continuous(expand = c(0, 0)) +
+  scale_y_continuous(expand = c(0, 0)) +
+  scale_fill_continuous(type = "viridis") +
+  theme(
+    legend.position='bottom'
+  ) + 
+  xlim(min(x_possible)-5, max(x_possible)+5) + 
+  ylim(min(y_possible)-5, max(y_possible)+5)
+
+
+```
+
+
+```{r}
+# Evaluating class models: 50/50 train test split
+set.seed(888)
+train_pct <- 0.5
+train_data <- shots %>% 
+  sample_frac(train_pct)
+test_data <- shots %>% 
+  anti_join(train_data %>% select(id), by = 'id')
+```
+
+```{r}
+# Function for MSE
+mse <- function(actual, preds){
+  return (mean((actual - preds)^2))
+}
+
+# Function for MAE
+mae <- function(actual, preds){
+  return(mean(abs(actual - preds)))
+}
+```
+
+
+```{r warning=FALSE}
+# Set up dataframe to store results
+results5050 = data.frame(modName = character(), MSE = double(), 
+                         MAE = double(), bias = character())
+
+# First model
+distance_mod <- glm(goalind ~ shot_distance, 
+                    data = train_data, 
+                    family = binomial)
+test_data$preds = predict(distance_mod, test_data)
+
+# MSE, MAE
+mse1 = round(mse(test_data$shot.statsbomb_xg, test_data$preds), 3)
+mae1 = round(mae(test_data$shot.statsbomb_xg, test_data$preds), 3)
+result1 = data.frame(modName = "Logistic Distance", MSE = mse1, MAE = mae1, 
+                     bias = "Very biased")
+results5050 = rbind(results5050, result1)
+
+# Second model
+distance_mod_2 <- glm(goalind ~ splines::ns(shot_distance), 
+                    data = train_data, 
+                    family = binomial)
+test_data$preds = predict(distance_mod_2, test_data)
+
+# MSE, MAE
+mse1 = round(mse(test_data$shot.statsbomb_xg, test_data$preds), 3)
+mae1 = round(mae(test_data$shot.statsbomb_xg, test_data$preds), 3)
+result1 = data.frame(modName = "Distance Spline", MSE = mse1, MAE = mae1, 
+                     bias = "Very biased")
+results5050 = rbind(results5050, result1)
+
+# Third model
+angle_mod <- glm(goalind ~ shot_distance*shot_angle, 
+                 data = train_data, 
+                 family = binomial)
+test_data$preds = predict(angle_mod, test_data)
+
+# MSE, MAE
+mse1 = round(mse(test_data$shot.statsbomb_xg, test_data$preds), 3)
+mae1 = round(mae(test_data$shot.statsbomb_xg, test_data$preds), 3)
+result1 = data.frame(modName = "Angle*Distance", MSE = mse1, MAE = mae1, 
+                     bias = "Very biased")
+results5050 = rbind(results5050, result1)
+
+# Fourth model
+angle_spline_mod <- glm(goalind ~ shot_distance*splines::ns(shot_angle, df = 3), 
+                        data = train_data, 
+                        family = binomial)
+test_data$preds = predict(angle_spline_mod, test_data)
+
+# MSE, MAE
+mse1 = round(mse(test_data$shot.statsbomb_xg, test_data$preds), 3)
+mae1 = round(mae(test_data$shot.statsbomb_xg, test_data$preds), 3)
+result1 = data.frame(modName = "Distance*Angle spline", MSE = mse1, MAE = mae1, 
+                     bias = "Very biased")
+results5050 = rbind(results5050, result1)
+
+# Fifth model
+angle_rf_mod <- randomForest(goalind ~ shot_distance + shot_angle, 
+                             data = train_data)
+test_data$preds = predict(angle_rf_mod, test_data)
+
+# MSE, MAE
+mse1 = round(mse(test_data$shot.statsbomb_xg, test_data$preds), 3)
+mae1 = round(mae(test_data$shot.statsbomb_xg, test_data$preds), 3)
+result1 = data.frame(modName = "Distance, Angle RF", MSE = mse1, MAE = mae1, 
+                     bias = "Unbiased")
+results5050 = rbind(results5050, result1)
+
+# Sixth model
+all_rf_mod <- randomForest(goalind ~ shot_distance + 
+                             shot_angle +
+                             shot.type.name +
+                             shot.technique.name +
+                             shot.foot_head +
+                             shot.first_time + 
+                             shot.one_on_one + 
+                             shot.redirect + 
+                             shot.aerial_won + 
+                             shot.open_goal + 
+                             shot.follows_dribble
+                           , 
+                           data = train_data)
+test_data$preds = predict(all_rf_mod, test_data)
+
+# MSE, MAE
+mse1 = round(mse(test_data$shot.statsbomb_xg, test_data$preds), 3)
+mae1 = round(mae(test_data$shot.statsbomb_xg, test_data$preds), 3)
+result1 = data.frame(modName = "All vars RF", MSE = mse1, MAE = mae1, 
+                     bias = "Unbiased")
+results5050 = rbind(results5050, result1)
+```
+
+```{r}
+# Evaluating class models: 50/50 train test split
+set.seed(888)
+train_pct <- 0.8
+train_data <- shots %>% 
+  sample_frac(train_pct)
+test_data <- shots %>% 
+  anti_join(train_data %>% select(id), by = 'id')
+```
+
+```{r warning=FALSE}
+# Set up dataframe to store results
+results8020 = data.frame(modName = character(), MSE = double(), 
+                         MAE = double(), bias = character())
+
+# First model
+distance_mod <- glm(goalind ~ shot_distance, 
+                    data = train_data, 
+                    family = binomial)
+test_data$preds = predict(distance_mod, test_data)
+
+# MSE, MAE
+mse1 = round(mse(test_data$shot.statsbomb_xg, test_data$preds), 3)
+mae1 = round(mae(test_data$shot.statsbomb_xg, test_data$preds), 3)
+result1 = data.frame(modName = "Logistic Distance", MSE = mse1, MAE = mae1, 
+                     bias = "Very biased")
+results8020 = rbind(results8020, result1)
+
+# Second model
+distance_mod_2 <- glm(goalind ~ splines::ns(shot_distance), 
+                    data = train_data, 
+                    family = binomial)
+test_data$preds = predict(distance_mod_2, test_data)
+
+# MSE, MAE
+mse1 = round(mse(test_data$shot.statsbomb_xg, test_data$preds), 3)
+mae1 = round(mae(test_data$shot.statsbomb_xg, test_data$preds), 3)
+result1 = data.frame(modName = "Distance Spline", MSE = mse1, MAE = mae1, 
+                     bias = "Very biased")
+results8020 = rbind(results8020, result1)
+
+# Third model
+angle_mod <- glm(goalind ~ shot_distance*shot_angle, 
+                 data = train_data, 
+                 family = binomial)
+test_data$preds = predict(angle_mod, test_data)
+
+# MSE, MAE
+mse1 = round(mse(test_data$shot.statsbomb_xg, test_data$preds), 3)
+mae1 = round(mae(test_data$shot.statsbomb_xg, test_data$preds), 3)
+result1 = data.frame(modName = "Angle*Distance", MSE = mse1, MAE = mae1, 
+                     bias = "Very biased")
+results8020 = rbind(results8020, result1)
+
+# Fourth model
+angle_spline_mod <- glm(goalind ~ shot_distance*splines::ns(shot_angle, df = 3), 
+                        data = train_data, 
+                        family = binomial)
+test_data$preds = predict(angle_spline_mod, test_data)
+
+# MSE, MAE
+mse1 = round(mse(test_data$shot.statsbomb_xg, test_data$preds), 3)
+mae1 = round(mae(test_data$shot.statsbomb_xg, test_data$preds), 3)
+result1 = data.frame(modName = "Distance*Angle spline", MSE = mse1, MAE = mae1, 
+                     bias = "Very biased")
+results8020 = rbind(results8020, result1)
+
+# Fifth model
+angle_rf_mod <- randomForest(goalind ~ shot_distance + shot_angle, 
+                             data = train_data)
+test_data$preds = predict(angle_rf_mod, test_data)
+
+# MSE, MAE
+mse1 = round(mse(test_data$shot.statsbomb_xg, test_data$preds), 3)
+mae1 = round(mae(test_data$shot.statsbomb_xg, test_data$preds), 3)
+result1 = data.frame(modName = "Distance, Angle RF", MSE = mse1, MAE = mae1, 
+                     bias = "Unbiased")
+results8020 = rbind(results8020, result1)
+
+# Sixth model
+all_rf_mod <- randomForest(goalind ~ shot_distance + 
+                             shot_angle +
+                             shot.type.name +
+                             shot.technique.name +
+                             shot.foot_head +
+                             shot.first_time + 
+                             shot.one_on_one + 
+                             shot.redirect + 
+                             shot.aerial_won + 
+                             shot.open_goal + 
+                             shot.follows_dribble
+                           , 
+                           data = train_data)
+test_data$preds = predict(all_rf_mod, test_data)
+
+# MSE, MAE
+mse1 = round(mse(test_data$shot.statsbomb_xg, test_data$preds), 3)
+mae1 = round(mae(test_data$shot.statsbomb_xg, test_data$preds), 3)
+result1 = data.frame(modName = "All vars RF", MSE = mse1, MAE = mae1, 
+                     bias = "Unbiased")
+results8020 = rbind(results8020, result1)
+```
+
+
+```{r}
+plot(x = (test_data$preds - test_data$shot.statsbomb_xg), y = test_data$preds)
+```
+
+
+MY MODEL: TRYING XGBOOST
+
+```{r}
+# Fitting xgboost with 80/20 train-test split
+train_pct <- 0.8
+train_data <- shots %>% 
+  sample_frac(train_pct)
+test_data <- shots %>% 
+  anti_join(train_data %>% select(id), by = 'id')
+
+trainformod <- xgb.DMatrix(data = as.matrix(train_data[, c("shot_distance", 
+                                                      "shot_angle", 
+                                                      "shot.foot_preferred",
+                                                      "shot.first_time", 
+                                                      "shot.one_on_one", 
+                                                      "shot.openplay",
+                                                      "shot.redirect", 
+                                                      "shot.freekick", 
+                                                      "shot.penalty",
+                                                      "shot.foot", 
+                                                      "shot.head")]),
+                           label = train_data$goalind)
+
+
+# Set XGBoost parameters
+params <- list(
+  objective = "binary:logistic",  # Binary classification
+  eval_metric = "logloss"          # Logarithmic loss (log-loss) as evaluation metric
+)
+
+# Train the XGBoost model
+xg_model <- xgboost(data = trainformod, 
+                    params = params, 
+                    nrounds = 100,                # Number of boosting rounds (iterations)
+                    verbose = FALSE)
+
+testformod = xgb.DMatrix(data = as.matrix(test_data[, c("shot_distance", 
+                                                      "shot_angle", 
+                                                      "shot.foot_preferred",
+                                                      "shot.first_time", 
+                                                      "shot.one_on_one", 
+                                                      "shot.openplay",
+                                                      "shot.redirect", 
+                                                      "shot.freekick", 
+                                                      "shot.penalty",
+                                                      "shot.foot", 
+                                                      "shot.head")]),
+                           label = test_data$goalind)
+
+
+plot(predict(xg_model,testformod))
+```
+
+
+
+
+```{r}
+
+# Need to make all variables numeric (change shot type and foot or header)
+shots = shots %>%
+  mutate(shot.foot = ifelse(shot.foot_head == "foot", 1, 0),
+         shot.head = ifelse(shot.foot_head == "head", 1, 0),
+         shot.openplay = ifelse(shot.type.name == "Open Play", 1, 0),
+         shot.freekick = ifelse(shot.type.name == "Free Kick", 1, 0),
+         shot.penalty = ifelse(shot.type.name == "Penalty", 1, 0))
+```
+
+Now, time for analysis of top players
+
+Get xG for each chance using RF model
+
+```{r}
+shots$rfpreds = predict(all_rf_mod, shots)
+
+topPlayersOverall = shots %>%
+  group_by(player.name) %>%
+  summarise(goalAbovexG = round((sum(goalind) - sum(rfpreds)), 2)) %>%
+  arrange(desc(goalAbovexG)) %>%
+  mutate('Player Name' = player.name, 'Goals Above xG' = goalAbovexG) %>%
+  select('Player Name', 'Goals Above xG')
+
+```
+
+```{r}
+topPlayersfreekick = shots %>%
+  filter(shot.freekick == 1) %>%
+  group_by(player.name) %>%
+  summarise(goalAbovexG = round((sum(goalind) - sum(rfpreds)), 2)) %>%
+  arrange(desc(goalAbovexG)) %>%
+  mutate('Player Name' = player.name, 'Goals Above xG' = goalAbovexG) %>%
+  select('Player Name', 'Goals Above xG')
+
+kable(head(topPlayersfreekick, 10), caption = "Top Players for Free Kicks")
+```
+
+
+```{r}
+shots %>%
+  filter(shot.freekick == 1)
+```
+
+```{r}
+topPlayersshort = shots %>%
+  filter(shot_distance < 18) %>%
+  group_by(player.name) %>%
+  summarise(goalAbovexG = round((sum(goalind) - sum(rfpreds)), 2)) %>%
+  arrange(desc(goalAbovexG)) %>%
+  mutate('Player Name' = player.name, 'Goals Above xG' = goalAbovexG) %>%
+  select('Player Name', 'Goals Above xG')
+
+tableshort = kable(head(topPlayersshort, 10), caption = "Top Players for Short Shots")
+
+topPlayerslong = shots %>%
+  filter(shot_distance > 18) %>%
+  group_by(player.name) %>%
+  summarise(goalAbovexG = round((sum(goalind) - sum(rfpreds)), 2)) %>%
+  arrange(desc(goalAbovexG)) %>%
+  mutate('Player Name' = player.name, 'Goals Above xG' = goalAbovexG) %>%
+  select('Player Name', 'Goals Above xG')
+
+tablelong = kable(head(topPlayerslong, 10), caption = "Top Players for Long Shots")
+```
+
+
+
+
+
+
+```{r}
+# Combine the LaTeX code for both tables into a single LaTeX snippet
+combined_latex <- paste0("\\begin{table}[H]\n",
+                         "\\begin{minipage}{.5\\linewidth}\n",
+                         tableshort,
+                         "\\end{minipage}%",
+                         "\\begin{minipage}{.5\\linewidth}\n",
+                         tablelong,
+                         "\\end{minipage}%",
+                         "\\end{table}")
+
+# Print the combined LaTeX code to display both tables side by side
+cat(combined_latex)
+
+```
+
+
+
+
+
+
+
+
+
+
+
+
