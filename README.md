@@ -5,4 +5,4 @@ The first part of this project was to calculate expected runs in baseball based 
 
 For the soccer analysis, the goal was to create an xG model and compare it to the statsbomb xG. The data contains information on 12,000 shots from La Liga games, and many different xG models were fit. The best models were xG boost and random forest models, details for which can be found in the pdf. Results are then summarized pointing out the top players based on the number of goals scored above expected goals (Lionel Messi) overall and then broken down by long shots, free kicks, short shots, headers, etc. 
 
-A couple working markdown documents are also uploaded, but full details can be found in the miniproject2final.rmd file.
+A couple working markdown documents are also uploaded, but full details can be found in the FinalMiniProject2.rmd file. Data can be found in the compressed zip data folder.
